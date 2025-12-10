@@ -2163,7 +2163,7 @@ class PPOTrainer:
             if not all_state_dicts:
                 continue
             
-            # Normalize returns
+            # normalize
             returns_np = np.concatenate(all_returns)
             returns_mean = returns_np.mean()
             returns_std = returns_np.std() + 1e-8
@@ -2197,7 +2197,6 @@ class PPOTrainer:
                     batch_advantages = advantages[idx]
                     batch_masks = masks[idx] if masks is not None else None
                     
-                    # Forward pass WITHOUT mask (we'll apply it manually)
                     logits, values = self.network(batched_state, head_type=head_type, mask=None)
                     
                     if torch.isnan(logits).any() or torch.isnan(values).any():
@@ -2208,44 +2207,38 @@ class PPOTrainer:
                             'entropy': float('nan')
                         }
                     
-                    # CRITICAL FIX: Apply mask to logits before creating distribution
                     if batch_masks is not None:
                         masked_logits = logits.clone()
-                        # Set invalid actions to -inf (will have prob=0 after softmax)
+                        # set invalid actions to -inf (will have prob=0 after softmax)
                         masked_logits[batch_masks == 0] = float('-inf')
                         
-                        # Check if any sample has all actions masked (shouldn't happen)
                         valid_actions_per_sample = (batch_masks == 1).sum(dim=1)
                         if (valid_actions_per_sample == 0).any():
                             print(f"WARNING: Some samples in {head_type} have no valid actions!")
-                            # Emergency fix: enable first action for those samples
                             all_masked_samples = (valid_actions_per_sample == 0)
                             masked_logits[all_masked_samples, 0] = 0.0
                     else:
-                        # No mask provided - use raw logits (shouldn't happen in practice)
                         masked_logits = logits
                     
-                    # Create distribution from MASKED logits
+                    # get distribution from masked logits
                     dist = torch.distributions.Categorical(logits=masked_logits)
                     
-                    # Compute log probs of the actions that were actually taken
                     new_log_probs = dist.log_prob(batch_actions)
                     
-                    # Compute entropy (naturally respects masking since dist uses masked_logits)
                     entropy = dist.entropy().mean()
                     
-                    # PPO clipped objective
+                    # clipping PPO
                     ratio = torch.exp(new_log_probs - batch_old_log_probs)
                     
                     surr1 = ratio * batch_advantages
                     surr2 = torch.clamp(ratio, 1.0 - self.eps_clip, 1.0 + self.eps_clip) * batch_advantages
                     policy_loss = -torch.min(surr1, surr2).mean()
                     
-                    # Value loss (standard MSE)
+                    # MSE for value
                     value_pred = values.squeeze(-1) if values.dim() > 1 else values
                     value_loss = 0.5 * torch.nn.functional.mse_loss(value_pred, batch_returns)
                     
-                    # Combined PPO loss
+                    # full loss
                     loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
 
                     if torch.isnan(loss):
@@ -2253,8 +2246,7 @@ class PPOTrainer:
                         print(f"  Policy loss: {policy_loss.item()}, Value loss: {value_loss.item()}, Entropy: {entropy.item()}")
                         print(f"  Ratio range: [{ratio.min().item():.3f}, {ratio.max().item():.3f}]")
                         continue
-                    
-                    # Gradient update
+
                     self.optimizer.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
